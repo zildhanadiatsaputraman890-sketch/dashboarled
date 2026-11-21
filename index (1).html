@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kontrol LED ESP32 via MQTT</title>
+  <style>
+    body { font-family: Arial; text-align: center; margin: 40px auto; max-width: 560px; padding: 0 12px; }
+    .btn { font-size: 28px; padding: 16px 40px; margin: 8px; border: none;
+           color: white; cursor: pointer; background: #4CAF50; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .off { background: #555; }
+    .cfg { margin: 16px 0; }
+    .cfg input { padding: 6px; font-size: 16px; width: 140px; }
+    .cfg button { padding: 7px 16px; font-size: 16px; cursor: pointer; }
+    .badge { display: inline-block; padding: 4px 12px; margin: 4px; border-radius: 12px;
+             font-size: 14px; color: white; background: #888; }
+    .badge.ok { background: #2e7d32; }
+    .badge.bad { background: #c62828; }
+    .badge.wait { background: #ef6c00; }
+    #log { text-align: left; font-family: monospace; font-size: 13px; background: #f4f4f4;
+           border: 1px solid #ddd; padding: 8px; height: 190px; overflow-y: auto; margin-top: 24px; }
+    #log div { padding: 1px 0; }
+    .in { color: #1565c0; }
+    .out { color: #2e7d32; }
+    .sys { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Kontrol LED via MQTT (EMQX)</h1>
+
+  <div class="cfg">
+    Broker: <input id="host" placeholder="IP laptop">
+    Grup: <input id="grup" value="tim4" style="width:80px">
+    <button onclick="connect()">Sambung</button>
+  </div>
+  <div>
+    <span id="conn" class="badge">Belum tersambung</span>
+    <span id="esp" class="badge">ESP32: belum diketahui</span>
+  </div>
+
+  <p>LED GPIO 26: <b id="s26"></b></p>
+  <button class="btn" id="b26" onclick="toggle('26')"></button>
+  <p>LED GPIO 27: <b id="s27"></b></p>
+  <button class="btn" id="b27" onclick="toggle('27')"></button>
+
+  <h3>Log pesan MQTT</h3>
+  <div id="log"></div>
+
+<!-- Pakai file lokal mqtt.min.js jika ada (untuk kelas tanpa internet); jika tidak, ambil dari CDN -->
+<script src="mqtt.min.js"></script>
+<script>
+  if (typeof mqtt === "undefined") {
+    document.write('<script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"><\/script>');
+  }
+</script>
+
+<script>
+const PINS = ["26", "27"];
+let client = null;
+let base = "";
+let st = {"26": null, "27": null};   // null = belum tahu kondisinya
+let espOnline = null;
+
+const el = id => document.getElementById(id);
+el("host").value = "broker.emqx.io";
+
+function log(kelas, teks) {
+  const d = document.createElement("div");
+  d.className = kelas;
+  d.textContent = new Date().toLocaleTimeString() + "  " + teks;
+  const box = el("log");
+  box.appendChild(d);
+  while (box.children.length > 80) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+function setConn(teks, kelas) {
+  const c = el("conn");
+  c.textContent = teks;
+  c.className = "badge " + kelas;
+}
+
+function render() {
+  const tersambung = !!(client && client.connected);
+  for (const pin of PINS) {
+    const v = st[pin];
+    el("s" + pin).textContent = v === null ? "?" : (v ? "ON" : "OFF");
+    const b = el("b" + pin);
+    b.textContent = v ? "MATIKAN" : "NYALAKAN";
+    b.className = "btn" + (v ? " off" : "");
+    b.disabled = !tersambung;
+  }
+  const e = el("esp");
+  if (espOnline === null) { e.textContent = "ESP32: belum diketahui"; e.className = "badge"; }
+  else if (espOnline)     { e.textContent = "ESP32: online";  e.className = "badge ok"; }
+  else                    { e.textContent = "ESP32: offline"; e.className = "badge bad"; }
+}
+
+function connect() {
+  if (client) client.end(true);
+  const host = el("host").value.trim();
+  const grup = el("grup").value.trim() || "tim4";
+  base = "kelas-08A/24/" + grup;
+  st = {"26": null, "27": null};
+  espOnline = null;
+  render();
+  setConn("Menyambung...", "wait");
+
+  // Browser memakai WebSocket (8083 / 8084 untuk HTTPS), bukan port 1883 seperti ESP32
+  const aman = location.protocol === "https:";
+  const url = (aman ? "wss://" : "ws://") + host + ":" + (aman ? 8084 : 8083) + "/mqtt";
+  client = mqtt.connect(url, {
+    clientId: "web-" + Math.random().toString(16).slice(2, 8),
+    reconnectPeriod: 2000
+  });
+
+  client.on("connect", () => {
+    setConn("Terhubung ke broker", "ok");
+    log("sys", "Terhubung ke " + url);
+    const t1 = base + "/led26/status";
+    const t2 = base + "/led27/status";
+    const t3 = base + "/esp32/status";
+    client.subscribe([t1, t2, t3], { qos: 1 });
+    log("sys", "SUBSCRIBE " + t1);
+    log("sys", "SUBSCRIBE " + t2);
+    log("sys", "SUBSCRIBE " + t3);
+    render();
+  });
+
+  client.on("message", (topic, msg, packet) => {
+    const p = msg.toString();
+    log("in", "TERIMA  " + topic + " = " + p + (packet.retain ? "  [retained]" : ""));
+    if (topic === base + "/esp32/status") {
+      espOnline = (p === "online");
+    } else {
+      const m = topic.match(/\/led(\d+)\/status$/);
+      if (m && PINS.includes(m[1])) st[m[1]] = (p === "1") ? 1 : 0;
+    }
+    render();
+  });
+
+  client.on("reconnect", () => setConn("Mencoba menyambung ulang...", "wait"));
+  client.on("close", () => { setConn("Terputus dari broker", "bad"); render(); });
+  client.on("error", err => log("sys", "Error: " + err.message));
+}
+
+function toggle(pin) {
+  if (!client || !client.connected) return;
+  const baru = st[pin] ? "0" : "1";
+  const topic = base + "/led" + pin + "/set";
+  // retain=true: broker menyimpan perintah terakhir, jadi ESP32 yang baru menyala
+  // langsung mengikuti perintah itu (peran yang di versi HTTP dipegang state.txt)
+  client.publish(topic, baru, { qos: 1, retain: true });
+  log("out", "KIRIM   " + topic + " = " + baru + "  [retain]");
+}
+
+render();
+connect();
+</script>
+</body>
+</html>
